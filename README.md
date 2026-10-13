@@ -1,15 +1,22 @@
 # Agentic LangGraph
 
-A step-by-step LangGraph chatbot, built in `1-BasicChatBot/basicChatBot.ipynb`. Each section of the notebook replaces the graph with a richer one: a single LLM node, tool calling, a ReAct loop, checkpointed memory, streaming, and a human-in-the-loop interrupt.
+Two pieces of work:
 
-The model is Groq's `openai/gpt-oss-120b`, loaded with `init_chat_model("groq:openai/gpt-oss-120b")`.
+1. A step-by-step LangGraph chatbot in `1-BasicChatBot/basicChatBot.ipynb`. Each section replaces the graph with a richer one: a single LLM node, tool calling, a ReAct loop, checkpointed memory, streaming, and a human-in-the-loop interrupt.
+2. An MCP client in `MCP/` that loads tools from a local math server and a local weather server, then answers with a LangChain agent.
+
+The model is Groq's `openai/gpt-oss-120b`. The notebook loads it with `init_chat_model("groq:openai/gpt-oss-120b")`. The MCP client loads it with `ChatGroq(model="openai/gpt-oss-120b")`.
 
 ## Project layout
 
 ```
 AgenticLangraph/
 ├── 1-BasicChatBot/
-│   └── basicChatBot.ipynb    # the working notebook
+│   └── basicChatBot.ipynb    # chatbot notebook
+├── MCP/
+│   ├── mathserver.py         # add and multiply over stdio
+│   ├── weather.py            # get_weather over streamable HTTP
+│   └── client.py             # agent that calls both servers
 ├── pyproject.toml            # Python 3.13+ and package dependencies
 ├── requirements.txt          # pip-style dependency list
 ├── .env                      # GROQ_API_KEY and TAVILY_API_KEY (not committed)
@@ -33,9 +40,17 @@ GROQ_API_KEY=your_groq_key
 TAVILY_API_KEY=your_tavily_key
 ```
 
-The notebook calls `load_dotenv()`, so those keys are picked up before the model and the search tool are created. Open `1-BasicChatBot/basicChatBot.ipynb` and select the `.venv` kernel.
+The notebook and `MCP/client.py` both call `load_dotenv()`, so those keys are picked up before the model and tools are created. Open `1-BasicChatBot/basicChatBot.ipynb` and select the `.venv` kernel.
 
-Dependencies: `langgraph`, `langchain`, `langchain-groq`, `langchain-tavily`, `langsmith`, `python-dotenv`, and `ipykernel`.
+Run Python files with that same environment. A plain `python` command can point at the global interpreter, which does not have these packages and fails with `No module named 'mcp'`. From the repo root:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+```
+
+The prompt then shows `(.venv)`.
+
+Dependencies: `langgraph`, `langchain`, `langchain-groq`, `langchain-tavily`, `langchain-mcp-adapters`, `mcp`, `langsmith`, `python-dotenv`, and `ipykernel`.
 
 ## Shared state
 
@@ -182,3 +197,45 @@ Prompt used: `"I need some expert guidance and assistance for building AI Agent.
 ## How a tool call is chosen
 
 `bind_tools` attaches the tool schemas to the model. On each model node, the model sees the conversation plus those schemas and returns one `AIMessage`. A question about current news tends to produce a `tavily_search` tool call. A multiplication question tends to produce a `multiply` tool call. A greeting tends to produce text and an empty `tool_calls` list. `tools_condition` only inspects that list.
+
+## 7. MCP client
+
+MCP (Model Context Protocol) serves tools from separate processes. `MCP/client.py` connects to two servers, turns their tools into LangChain tools, and passes those tools to an agent.
+
+| File | Server | Transport | Tools |
+| --- | --- | --- | --- |
+| `mathserver.py` | `FastMCP("Math")` | `stdio` | `add(a, b)`, `multiply(a, b)` |
+| `weather.py` | `FastMCP("Weather")` | `streamable-http` on `http://localhost:8000/mcp` | `get_weather(location)` returns `"It's raining in California"` |
+
+The math server is started by the client. Its config uses `"command": "python"` and `"args": ["mathserver.py"]` with `"transport": "stdio"`, so the client speaks to that process over stdin and stdout. Run `client.py` from the `MCP` folder so `mathserver.py` is found.
+
+The weather server is not started by the client. Start it first, in its own terminal, with the virtual environment active:
+
+```powershell
+cd MCP
+python weather.py
+```
+
+Leave that process running. The client then connects with `"transport": "streamable-http"` and `"url": "http://localhost:8000/mcp"`.
+
+`client.py` builds the agent like this:
+
+```python
+from langchain_mcp_adapters.client import MultiServerMCPClient
+from langchain.agents import create_agent
+
+tools = await client.get_tools()
+model = ChatGroq(model="openai/gpt-oss-120b")
+agent = create_agent(model=model, tools=tools)
+```
+
+`MultiServerMCPClient` is exported from `langchain_mcp_adapters.client`, not from the top-level `langchain_mcp_adapters` package. `create_agent` lives in `langchain.agents`. `langchain.agents` and `langchain_core.agents` do not provide `create_react_agent`.
+
+The client is async. `get_tools()` and the agent call are awaited. The agent method is `ainvoke`. `invoke` returns a dict immediately, and `await` on that dict raises `TypeError: object dict can't be used in 'await' expression`.
+
+Prompts in `client.py`:
+
+- `"What is (3 + 5) x 10?"` uses the math tools and prints `Math Response:` (`80`).
+- `"What is the weather in California?"` uses `get_weather` and prints `Weather Response:`.
+
+`qwen-qwq-32b` is decommissioned on Groq and returns HTTP 400 `model_decommissioned`. This client uses `openai/gpt-oss-120b` instead.
