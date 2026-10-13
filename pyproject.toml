@@ -1,0 +1,27 @@
+[project]
+name = "agenticlangraph"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Nandini Amaravadi", email = "nandiniamaravadi@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "ipykernel>=7.4.0",
+    "langchain>=1.4.4",
+    "langchain-groq>=1.1.3",
+    "langchain-mcp-adapters>=0.3.2",
+    "langchain-tavily>=0.2.18",
+    "langgraph>=1.2.14",
+    "langsmith>=0.14.7",
+    "mcp>=1.30.0",
+    "python-dotenv>=1.2.4",
+]
+
+[project.scripts]
+agenticlangraph = "agenticlangraph:main"
+
+[build-system]
+requires = ["uv_build>=0.12.23,<0.13.0"]
+build-backend = "uv_build"
