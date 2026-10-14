@@ -1,11 +1,13 @@
 # Agentic LangGraph
 
-Two pieces of work:
+Four pieces of work:
 
 1. A step-by-step LangGraph chatbot in `1-BasicChatBot/basicChatBot.ipynb`. Each section replaces the graph with a richer one: a single LLM node, tool calling, a ReAct loop, checkpointed memory, streaming, and a human-in-the-loop interrupt.
 2. An MCP client in `MCP/` that loads tools from a local math server and a local weather server, then answers with a LangChain agent.
+3. A tool-calling agent in `2-Debugging/` that runs in LangGraph Studio, with LangSmith tracing turned on.
+4. Two multi-agent graphs in `3-Agents/multiaiagents.ipynb`: a researcher-writer pipeline, then a supervisor that routes work to a researcher, an analyst, and a writer.
 
-The model is Groq's `openai/gpt-oss-120b`. The notebook loads it with `init_chat_model("groq:openai/gpt-oss-120b")`. The MCP client loads it with `ChatGroq(model="openai/gpt-oss-120b")`.
+The larger model is Groq's `openai/gpt-oss-120b`, used by the chatbot notebook and the MCP client. The debugging agent and the multi-agent notebook use the smaller Groq model `openai/gpt-oss-20b`, which is the current stand-in for the retired `llama3-8b-8192` and `llama-3.1-8b-instant` models.
 
 ## Project layout
 
@@ -13,13 +15,19 @@ The model is Groq's `openai/gpt-oss-120b`. The notebook loads it with `init_chat
 AgenticLangraph/
 ├── 1-BasicChatBot/
 │   └── basicChatBot.ipynb    # chatbot notebook
+├── 2-Debugging/
+│   ├── debugging.ipynb       # tool-calling agent notebook
+│   ├── agents.py             # graph exported for LangGraph Studio
+│   └── langgraph.json        # Studio config
+├── 3-Agents/
+│   └── multiaiagents.ipynb   # researcher/writer and supervisor graphs
 ├── MCP/
 │   ├── mathserver.py         # add and multiply over stdio
 │   ├── weather.py            # get_weather over streamable HTTP
 │   └── client.py             # agent that calls both servers
 ├── pyproject.toml            # Python 3.13+ and package dependencies
 ├── requirements.txt          # pip-style dependency list
-├── .env                      # GROQ_API_KEY and TAVILY_API_KEY (not committed)
+├── .env                      # API keys (not committed)
 └── .gitignore
 ```
 
@@ -38,9 +46,10 @@ Create a `.env` file in the repo root:
 ```
 GROQ_API_KEY=your_groq_key
 TAVILY_API_KEY=your_tavily_key
+LANGCHAIN_API_KEY=your_langsmith_key
 ```
 
-The notebook and `MCP/client.py` both call `load_dotenv()`, so those keys are picked up before the model and tools are created. Open `1-BasicChatBot/basicChatBot.ipynb` and select the `.venv` kernel.
+`LANGCHAIN_API_KEY` is used by `2-Debugging/agents.py` so Studio runs show up in the LangSmith project named `debugging`. The notebooks and `MCP/client.py` call `load_dotenv()`, so those keys are picked up before the model and tools are created. Open the notebooks and select the `.venv` kernel.
 
 Run Python files with that same environment. A plain `python` command can point at the global interpreter, which does not have these packages and fails with `No module named 'mcp'`. From the repo root:
 
@@ -50,7 +59,9 @@ Run Python files with that same environment. A plain `python` command can point 
 
 The prompt then shows `(.venv)`.
 
-Dependencies: `langgraph`, `langchain`, `langchain-groq`, `langchain-tavily`, `langchain-mcp-adapters`, `mcp`, `langsmith`, `python-dotenv`, and `ipykernel`.
+Dependencies: `langgraph`, `langgraph-cli[inmem]`, `langchain`, `langchain-groq`, `langchain-tavily`, `langchain-mcp-adapters`, `langchain-openai`, `mcp`, `langsmith`, `python-dotenv`, and `ipykernel`.
+
+`datetime` is part of the Python standard library. The import is `from datetime import datetime`. Nothing extra is installed for it.
 
 ## Shared state
 
@@ -239,3 +250,73 @@ Prompts in `client.py`:
 - `"What is the weather in California?"` uses `get_weather` and prints `Weather Response:`.
 
 `qwen-qwq-32b` is decommissioned on Groq and returns HTTP 400 `model_decommissioned`. This client uses `openai/gpt-oss-120b` instead.
+
+## 8. Debugging and LangGraph Studio
+
+`2-Debugging/debugging.ipynb` and `2-Debugging/agents.py` build the same tool-calling loop used earlier:
+
+```
+START -> tool_calling_llm --tool call--> tools
+                          ^                 |
+                          |-----------------|
+                          --no tool call--> END
+```
+
+The only tool is `add(a, b)`. The model is loaded with an explicit provider, because `openai/gpt-oss-20b` does not tell `init_chat_model` which service to call:
+
+```python
+llm = init_chat_model(model="openai/gpt-oss-20b", model_provider="groq")
+```
+
+`agents.py` also sets `LANGCHAIN_TRACING_V2=true` and `LANGCHAIN_PROJECT=debugging`.
+
+LangGraph Studio reads `langgraph.json` from the current directory. From the repo root, `langgraph dev` fails with `Path 'langgraph.json' does not exist` because that file is in `2-Debugging/`. Start Studio from that folder:
+
+```powershell
+cd 2-Debugging
+langgraph dev
+```
+
+`langgraph.json` registers one graph:
+
+```json
+{
+  "dependencies": ["."],
+  "graphs": {
+    "tool_agent": "./agents.py:tool_agent"
+  },
+  "env": "../.env"
+}
+```
+
+`tool_agent` is the compiled graph returned by `make_tool_call()`. A prompt such as `"What is 2 plus 2?"` often gets a direct answer and an empty `tool_calls` list, so `add` never runs. `tools_condition` only routes to `tools` when that list is non-empty. Forcing `tool_choice="add"` on every model call loops forever here, because `tools` goes back to the model. Force it only on the first call, then let the following call answer from the `ToolMessage`.
+
+## 9. Multi-agent graphs
+
+`3-Agents/multiaiagents.ipynb` uses `ChatGroq(model_name="openai/gpt-oss-20b")`. Web search uses `from langchain_tavily import TavilySearch`. The older `langchain_community.tools.tavily_search.TavilySearchResults` import still runs, but it warns that `langchain-community` is no longer maintained.
+
+`create_agent` is imported from `langchain.agents`. There is no `langgraph.agents` module.
+
+### Researcher and writer
+
+State is `AgentState(MessagesState)` plus `next_agent`. Tools are `search_web` (Tavily, `max_results=2`) and `write_summary`.
+
+```
+researcher -> writer -> END
+```
+
+`research_agent` binds `search_web` and sets `next_agent` to `"writer"`. `writer_agent` summarizes the conversation and sets `next_agent` to `"end"`. `execute_tools` is defined in the notebook, and this compiled graph does not include it as a node, so a tool call on the researcher message is not executed before the writer runs.
+
+Tried with: `"Reseach about the agentic AI in business"`. The researcher message requests `search_web`, then the writer returns a summary of agentic AI in business.
+
+### Supervisor
+
+`SupervisorState` extends `MessagesState` with `next_agent`, `research_data`, `analysis`, `final_report`, `task_complete`, and `current_task`.
+
+Nodes: `supervisor`, `researcher`, `analyst`, `writer`. The entry point is `supervisor`. Every node uses `add_conditional_edges` with `router`. `add_edge` only accepts a start node and an end node, so passing `router` and a path map raises `StateGraph.add_edge() takes 3 positional arguments but 4 were given`.
+
+`router` reads `next_agent`. It returns `END` when the value is `"end"` or `task_complete` is true. Otherwise it returns `supervisor`, `researcher`, `analyst`, or `writer`.
+
+The supervisor prompt is a normal string inside `ChatPromptTemplate`. An `f"""..."""` string evaluates `{has_research}` immediately, before `supervisor_agent` creates that variable, and raises `NameError: name 'has_research' is not defined`. The template fills `{has_research}`, `{has_analysis}`, `{has_report}`, and `{task}` when `chain.invoke` runs.
+
+Tried with: `"Research about the latest trends in AI"`. The supervisor printed `researcher`, then `analyst`, then `writer`. The result state has `research_data`, `analysis`, `final_report`, and `task_complete=True`.

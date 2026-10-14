@@ -6,3 +6,5 @@ langchain-groq
 langchain_tavily
 langchain-mcp-adapters
 mcp
+langchain_openai
+langgraph-cli[inmem]
